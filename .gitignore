@@ -1,0 +1,6 @@
+.gemini_api_key
+.env
+*.log
+*.wav
+*.pyc
+__pycache__/
