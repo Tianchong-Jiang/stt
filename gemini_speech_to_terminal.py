@@ -25,7 +25,7 @@ import wave
 DEFAULT_MODEL = "gemini-3.5-flash,gemini-3.1-flash-lite,gemini-2.5-flash"
 DEFAULT_REPO = Path("/home/ripl/workspace/codex_workspace")
 DEFAULT_CWD = DEFAULT_REPO
-DEFAULT_DEVICE = "hw:2,0"
+DEFAULT_DEVICE = "plughw:CARD=Microphone,DEV=0"
 DEFAULT_DURATION = 5
 DEFAULT_API_KEY_FILE = Path(__file__).resolve().with_name(".gemini_api_key")
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
@@ -497,7 +497,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--audio", type=Path, help="existing audio file; skips microphone recording")
     parser.add_argument("--duration", type=int, default=DEFAULT_DURATION, help="recording duration in seconds")
-    parser.add_argument("--device", default=DEFAULT_DEVICE, help="ALSA input device, for example hw:2,0")
+    parser.add_argument(
+        "--device",
+        default=DEFAULT_DEVICE,
+        help="ALSA input device, for example plughw:CARD=Microphone,DEV=0",
+    )
     parser.add_argument("--repo", type=Path, default=DEFAULT_REPO, help="repo or project path for context")
     parser.add_argument("--cwd", type=Path, default=DEFAULT_CWD, help="current working directory context")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Gemini model, or comma-separated fallback list")

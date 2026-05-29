@@ -1,0 +1,14 @@
+[Unit]
+Description=STT hotkey and status window
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ripl/workspace/stt
+ExecStartPre=/usr/bin/test -r /home/ripl/workspace/stt/.gemini_api_key
+ExecStart=/home/ripl/miniconda3/bin/python3 /home/ripl/workspace/stt/stt_toggle.py --status-window
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

@@ -20,7 +20,7 @@ TRANSCRIBER = HERE / "gemini_speech_to_terminal.py"
 LOG_FILE = HERE / "stt.log"
 STATE_FILE = Path("/tmp/stt_toggle_state.json")
 STATUS_FILE = Path("/tmp/stt_toggle_status.json")
-DEVICE = "hw:2,0"
+DEVICE = "plughw:CARD=Microphone,DEV=0"
 RECORD_ARGS = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", DEVICE]
 STOP_POSTROLL_SECONDS = 0.75
 
