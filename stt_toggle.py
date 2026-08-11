@@ -20,6 +20,7 @@ TRANSCRIBER = HERE / "gemini_speech_to_terminal.py"
 LOG_FILE = HERE / "stt.log"
 STATE_FILE = Path("/tmp/stt_toggle_state.json")
 STATUS_FILE = Path("/tmp/stt_toggle_status.json")
+STATUS_WINDOW_PID_FILE = Path("/tmp/stt_toggle_status_window.pid")
 DEVICE = "plughw:CARD=Microphone,DEV=0"
 RECORD_ARGS = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", DEVICE]
 STOP_POSTROLL_SECONDS = 0.75
@@ -48,7 +49,27 @@ def set_status(text: str, color: str, ttl: float | None = None) -> None:
     STATUS_FILE.write_text(json.dumps(payload))
 
 
+def make_window_click_through(root: tk.Tk) -> None:
+    from Xlib import X, display
+    from Xlib.ext import shape
+
+    disp = display.Display()
+    try:
+        window = disp.create_resource_object("window", root.winfo_id())
+        screen_root = disp.screen().root
+        while True:
+            parent = window.query_tree().parent
+            if parent.id == screen_root.id:
+                break
+            window = parent
+        window.shape_rectangles(shape.SO.Set, shape.SK.Input, X.YXBanded, 0, 0, [])
+        disp.sync()
+    finally:
+        disp.close()
+
+
 def status_window() -> None:
+    STATUS_WINDOW_PID_FILE.write_text(str(os.getpid()))
     threading.Thread(target=hotkey_loop, daemon=True).start()
     root = tk.Tk()
     root.title("STT")
@@ -57,6 +78,10 @@ def status_window() -> None:
     root.geometry("+24+80")
     label = tk.Label(root, text="STT idle", bg="#222222", fg="white", padx=14, pady=8, font=("Sans", 13, "bold"))
     label.pack()
+    root.update()
+    root.attributes("-alpha", 0.5)
+    root.update_idletasks()
+    make_window_click_through(root)
 
     def refresh() -> None:
         try:
@@ -121,7 +146,7 @@ def hotkey_loop() -> None:
 
 
 def ensure_status_window() -> None:
-    marker = Path("/tmp/stt_toggle_status_window.pid")
+    marker = STATUS_WINDOW_PID_FILE
     if marker.exists():
         try:
             pid = int(marker.read_text().strip())
