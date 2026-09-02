@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ LOG_FILE = HERE / "stt.log"
 STATE_FILE = Path("/tmp/stt_toggle_state.json")
 STATUS_FILE = Path("/tmp/stt_toggle_status.json")
 STATUS_WINDOW_PID_FILE = Path("/tmp/stt_toggle_status_window.pid")
+LOCK_FILE = Path("/tmp/stt_toggle.lock")
 DEVICE = "plughw:CARD=Microphone,DEV=0"
 RECORD_ARGS = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", DEVICE]
 STOP_POSTROLL_SECONDS = 0.75
@@ -194,6 +196,24 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def try_toggle_lock(path: Path = LOCK_FILE) -> int | None:
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def read_state() -> dict[str, object] | None:
     if not STATE_FILE.exists():
         return None
@@ -312,11 +332,18 @@ def main() -> None:
     if len(sys.argv) == 2 and sys.argv[1] == "--status-window":
         status_window()
         return
-    state = read_state()
-    if state is None:
-        start_recording()
-    else:
-        stop_recording(state)
+    lock_fd = try_toggle_lock()
+    if lock_fd is None:
+        log("toggle ignored: another invocation is active")
+        return
+    try:
+        state = read_state()
+        if state is None:
+            start_recording()
+        else:
+            stop_recording(state)
+    finally:
+        os.close(lock_fd)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import math
 import mimetypes
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import struct
 import sys
@@ -29,6 +31,9 @@ DEFAULT_DEVICE = "plughw:CARD=Microphone,DEV=0"
 DEFAULT_DURATION = 5
 DEFAULT_API_KEY_FILE = Path(__file__).resolve().with_name(".gemini_api_key")
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
+GEMINI_CONNECT_ATTEMPT_SECONDS = 2.0
+GEMINI_CONNECT_BUDGET_SECONDS = 6.0
+GEMINI_RESPONSE_TIMEOUT_SECONDS = 120.0
 END_MARKER = "[END_OF_TRANSCRIPT]"
 SKIP_DIRS = {
     ".git",
@@ -310,6 +315,66 @@ def summarize_http_error(code: int, body: str, model: str) -> str:
     return f"Gemini API HTTP {code} on {model}: {message[:500]}"
 
 
+def connect_with_retry(
+    address: tuple[str, int],
+    timeout: float,
+    source_address: tuple[str, int] | None = None,
+) -> socket.socket:
+    """Try fresh resolved addresses within one short connection budget."""
+    host, port = address
+    candidates = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    deadline = time.monotonic() + timeout
+    last_error: OSError | None = None
+
+    for family, socktype, proto, _, sockaddr in candidates * 2:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.settimeout(min(GEMINI_CONNECT_ATTEMPT_SECONDS, remaining))
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            sock.settimeout(max(0.001, deadline - time.monotonic()))
+            return sock
+        except OSError as exc:
+            last_error = exc
+            sock.close()
+
+    if last_error is not None:
+        raise TimeoutError(f"connection to {host}:{port} failed within {timeout:g}s") from last_error
+    raise OSError(f"no addresses resolved for {host}:{port}")
+
+
+class GeminiHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._create_connection = connect_with_retry
+
+    def connect(self) -> None:
+        response_timeout = self.timeout
+        self.timeout = GEMINI_CONNECT_BUDGET_SECONDS
+        try:
+            super().connect()
+        except Exception:
+            self.close()
+            raise
+        finally:
+            self.timeout = response_timeout
+        if self.sock is not None:
+            self.sock.settimeout(response_timeout)
+
+
+class GeminiHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(
+            GeminiHTTPSConnection,
+            req,
+            context=self._context,
+        )
+
+
 def generation_config(model: str, max_output_tokens: int) -> dict[str, object]:
     config: dict[str, object] = {
         "temperature": 0,
@@ -357,7 +422,8 @@ def call_gemini(api_key: str, model: str, prompt: str, audio_path: Path, max_out
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        opener = urllib.request.build_opener(GeminiHTTPSHandler())
+        with opener.open(req, timeout=GEMINI_RESPONSE_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
