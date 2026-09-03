@@ -162,23 +162,7 @@ These are synthetic examples of the intended behavior, not measured accuracy cla
    python run_policy.py --device cuda --seed 0
    ```
 
-3. Geometry notation and robotics vocabulary
-
-   Spoken and intended transcript:
-
-   ```text
-   把 camera extrinsics 从 world frame 转到 end-effector frame，再检查 SE(3) transform。
-   ```
-
-4. A deliberate correction that should not be silently discarded
-
-   Spoken and intended transcript:
-
-   ```text
-   先跑 checkpoint 10000，等等，不是 10000，是 100000，然后用 CUDA_VISIBLE_DEVICES=0。
-   ```
-
-5. Repository-local names
+3. Repository-local names
 
    If paths such as `configs/openvla_sim2real.yaml` and identifiers such as `DiffusionPolicy` exist under `--repo`, the context gives Gemini those exact candidate spellings instead of relying only on its general vocabulary.
 
