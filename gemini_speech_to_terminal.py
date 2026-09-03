@@ -22,7 +22,7 @@ import time
 import wave
 
 
-DEFAULT_MODEL = "gemini-3.5-flash,gemini-3.1-flash-lite,gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash,gemini-3.5-flash"
 DEFAULT_REPO = Path.home() / "workspace" / "codex_workspace"
 DEFAULT_CWD = DEFAULT_REPO
 DEFAULT_DEVICE = "default"
@@ -32,7 +32,15 @@ DEFAULT_MAX_OUTPUT_TOKENS = 2048
 GEMINI_CONNECT_ATTEMPT_SECONDS = 2.0
 GEMINI_CONNECT_BUDGET_SECONDS = 6.0
 END_MARKER = "[END_OF_TRANSCRIPT]"
-SKIP_DIRS = set(".git .mypy_cache .pytest_cache .ruff_cache .venv __pycache__ build dist node_modules wandb".split())
+TRANSCRIPTION_INSTRUCTION = f"""Transcribe the full audio into the exact text to insert at the cursor.
+Return only literal text: no explanation, Markdown, quotes, code fence, or Enter instruction.
+Use Simplified Chinese characters for Mandarin Chinese and preserve spoken English.
+Include soft or hesitant trailing words. Preserve capitalization and punctuation of technical terms.
+Use the context for names, paths, flags, variables, and explicit commands, but never invent them or turn a natural-language request into a command.
+When ambiguous, prefer the safest literal transcription.
+After the complete transcript, append a final line containing exactly {END_MARKER}; never include it earlier.
+For no intelligible speech, return [NO_SPEECH] followed by the marker line."""
+SKIP_DIRS = set(".git .mypy_cache .playwright-mcp .pytest_cache .ruff_cache .venv __pycache__ build dist node_modules wandb".split())
 TERM_SUFFIXES = set(".bash .cfg .ini .json .py .sh .toml .yaml .yml".split())
 STATIC_TERMS = set(
     "CUDA_VISIBLE_DEVICES PYTHONPATH pytest python sbatch squeue srun tmux git grep rg tail wandb Hydra MuJoCo "
@@ -69,7 +77,7 @@ def repo_root(path: Path) -> Path:
 def collect_files(root: Path, limit: int) -> list[str]:
     out = run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], root, 10)
     if out is not None:
-        paths = [p for p in out.split("\0") if p]
+        paths = [p for p in out.split("\0") if p and not SKIP_DIRS.intersection(Path(p).parts[:-1])]
     else:
         paths = [
             path.relative_to(root).as_posix()
@@ -142,16 +150,7 @@ Relevant identifiers and technical terms:
     if len(context) > max_context_chars:
         context = context[:max_context_chars] + "\n[context truncated]"
 
-    return f"""Transcribe the full audio into the exact text to insert at the cursor.
-Return only literal text: no explanation, Markdown, quotes, code fence, or Enter instruction.
-Include soft or hesitant trailing words. Preserve capitalization and punctuation of technical terms.
-Use the context for names, paths, flags, variables, and explicit commands, but never invent them or turn a natural-language request into a command.
-When ambiguous, prefer the safest literal transcription.
-After the complete transcript, append a final line containing exactly {END_MARKER}; never include it earlier.
-For no intelligible speech, return [NO_SPEECH] followed by the marker line.
-
-Repository context:
-{context}"""
+    return f"Repository context:\n{context}"
 
 
 def record_audio(path: Path, duration: int, device: str | None) -> None:
@@ -233,17 +232,11 @@ def connect_with_retry(address, timeout, source_address=None):
     raise TimeoutError(f"connection to {host}:{port} failed within {timeout:g}s") from last_error
 
 
-def generation_config(model: str, max_output_tokens: int) -> dict[str, object]:
-    config: dict[str, object] = {
-        "temperature": 0,
-        "candidateCount": 1,
+def generation_config(max_output_tokens: int) -> dict[str, object]:
+    return {
         "maxOutputTokens": max_output_tokens,
+        "thinkingConfig": {"thinkingLevel": "low"},
     }
-    if model.startswith("gemini-3"):
-        config["thinkingConfig"] = {"thinkingLevel": "minimal"}
-    elif model.startswith("gemini-2.5"):
-        config["thinkingConfig"] = {"thinkingBudget": 0}
-    return config
 
 
 def parse_transcript_response(text: str, model: str) -> str:
@@ -257,6 +250,7 @@ def parse_transcript_response(text: str, model: str) -> str:
 def call_gemini(api_key: str, model: str, prompt: str, audio_path: Path, max_output_tokens: int) -> str:
     audio_bytes = audio_path.read_bytes()
     payload = {
+        "systemInstruction": {"parts": [{"text": TRANSCRIPTION_INSTRUCTION}]},
         "contents": [
             {
                 "role": "user",
@@ -271,7 +265,7 @@ def call_gemini(api_key: str, model: str, prompt: str, audio_path: Path, max_out
                 ],
             }
         ],
-        "generationConfig": generation_config(model, max_output_tokens),
+        "generationConfig": generation_config(max_output_tokens),
     }
     host = "generativelanguage.googleapis.com"
     connection = http.client.HTTPSConnection(host, timeout=GEMINI_CONNECT_BUDGET_SECONDS)
@@ -473,7 +467,7 @@ def main() -> None:
     cwd = args.cwd.expanduser().resolve()
     prompt = build_prompt(root, cwd, args.max_files, args.max_terms, args.max_context_chars)
     if args.prompt_dump:
-        print(prompt)
+        print(f"{TRANSCRIPTION_INSTRUCTION}\n\n{prompt}")
         return
 
     api_key = load_api_key(args.api_key_file.expanduser())

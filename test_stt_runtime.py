@@ -36,6 +36,14 @@ class FakeSocket:
 
 
 class GeminiConnectionTest(unittest.TestCase):
+    def test_default_models_and_generation_config_follow_gemini_3_best_practices(self):
+        self.assertEqual(gemini_stt.DEFAULT_MODEL, "gemini-3.8-flash,gemini-3.5-flash")
+        self.assertEqual(
+            gemini_stt.generation_config(2048),
+            {"maxOutputTokens": 2048, "thinkingConfig": {"thinkingLevel": "low"}},
+        )
+        self.assertIn("Simplified Chinese", gemini_stt.TRANSCRIPTION_INSTRUCTION)
+
     def test_failed_address_is_retried_with_a_fresh_socket(self):
         first = FakeSocket(TimeoutError("black-holed"))
         second = FakeSocket()
