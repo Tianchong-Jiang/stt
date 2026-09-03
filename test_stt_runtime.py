@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+import inspect
 import os
 from pathlib import Path
 import socket
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import gemini_speech_to_terminal as gemini_stt
 import stt_toggle
@@ -80,6 +82,32 @@ class ToggleLockTest(unittest.TestCase):
 
         read_state.assert_not_called()
         log.assert_called_once_with("toggle ignored: another invocation is active")
+
+
+class ToggleSafetyTest(unittest.TestCase):
+    def test_recording_has_a_hard_duration_limit(self):
+        args = stt_toggle.parse_args([])
+        recorder = Mock(pid=4321)
+        recorder.poll.return_value = None
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "state.json"
+            with (
+                patch.object(stt_toggle, "STATE_FILE", state_file),
+                patch.object(stt_toggle, "ensure_status_window"),
+                patch.object(stt_toggle, "set_status"),
+                patch.object(stt_toggle, "log"),
+                patch.object(stt_toggle.time, "sleep"),
+                patch.object(stt_toggle.subprocess, "Popen", return_value=recorder) as popen,
+            ):
+                stt_toggle.start_recording(args)
+            audio = Path(json.loads(state_file.read_text())["audio"])
+            try:
+                self.assertEqual(popen.call_args.args[0][-5:-1], ["-d", "300", "-D", "default"])
+            finally:
+                audio.unlink(missing_ok=True)
+
+    def test_text_is_pasted_without_xdotool_type(self):
+        self.assertNotIn("xdotool", inspect.getsource(stt_toggle.type_text))
 
 
 if __name__ == "__main__":

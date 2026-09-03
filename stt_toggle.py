@@ -25,7 +25,7 @@ STATUS_FILE = Path("/tmp/stt_toggle_status.json")
 STATUS_WINDOW_PID_FILE = Path("/tmp/stt_toggle_status_window.pid")
 LOCK_FILE = Path("/tmp/stt_toggle.lock")
 DEFAULT_REPO = Path.home() / "workspace" / "codex_workspace"
-RECORD_ARGS = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1"]
+RECORD_ARGS = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-d", "300"]
 STOP_POSTROLL_SECONDS = 0.75
 
 
@@ -322,18 +322,39 @@ def stop_recording(state: dict[str, object], args: argparse.Namespace) -> None:
 
 
 def type_text(text: str) -> None:
+    clipboard = disp = None
     try:
-        subprocess.run(
-            ["xdotool", "type", "--clearmodifiers", "--delay", "0", "--", text],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except OSError as exc:
-        fail(f"could not run xdotool: {exc}")
-    except subprocess.CalledProcessError as exc:
-        fail(f"xdotool failed: {(exc.stderr or '').strip()[:200]}")
+        from Xlib import X, XK, display
+
+        disp = display.Display()
+        focus = disp.get_input_focus().focus
+        if focus in (X.NONE, X.PointerRoot):
+            raise RuntimeError("no focused X11 window")
+        clipboard = tk.Tk()
+        clipboard.withdraw()
+        clipboard.clipboard_clear()
+        clipboard.clipboard_append(text)
+        clipboard.selection_handle(lambda offset, length: text[int(offset):int(offset) + int(length)], selection="PRIMARY")
+        clipboard.selection_own(selection="PRIMARY")
+        clipboard.update()
+        focus.set_input_focus(X.RevertToPointerRoot, X.CurrentTime)
+        shift = disp.keysym_to_keycode(XK.string_to_keysym("Shift_L"))
+        insert = disp.keysym_to_keycode(XK.string_to_keysym("Insert"))
+        if not shift or not insert:
+            raise RuntimeError("could not resolve Shift+Insert keycodes")
+        for event, keycode in ((X.KeyPress, shift), (X.KeyPress, insert), (X.KeyRelease, insert), (X.KeyRelease, shift)):
+            disp.xtest_fake_input(event, keycode)
+        disp.sync()
+        for _ in range(25):
+            clipboard.update()
+            time.sleep(0.01)
+    except Exception as exc:
+        fail(f"clipboard paste failed: {exc}")
+    finally:
+        if clipboard is not None:
+            clipboard.destroy()
+        if disp is not None:
+            disp.close()
 
 
 def parse_args(argv=None) -> argparse.Namespace:
