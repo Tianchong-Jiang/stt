@@ -32,10 +32,12 @@ DEFAULT_MAX_OUTPUT_TOKENS = 2048
 GEMINI_CONNECT_ATTEMPT_SECONDS = 2.0
 GEMINI_CONNECT_BUDGET_SECONDS = 6.0
 END_MARKER = "[END_OF_TRANSCRIPT]"
-TRANSCRIPTION_INSTRUCTION = f"""Transcribe the full audio into the exact text to insert at the cursor.
-Return only literal text: no explanation, Markdown, quotes, code fence, or Enter instruction.
+TRANSCRIPTION_INSTRUCTION = f"""Transcribe the full audio into cursor-ready text, omitting only the fillers described below.
+Return only the transcript: no explanation, Markdown, quotes, code fence, or Enter instruction.
 Use Simplified Chinese characters for Mandarin Chinese and preserve spoken English.
-Include soft or hesitant trailing words. Preserve capitalization and punctuation of technical terms.
+Omit non-semantic hesitation fillers such as "uh", "um", "er", and "ah".
+Preserve meaningful interjections, deliberate repetition, corrections, and softly spoken trailing words.
+Preserve capitalization and punctuation of technical terms.
 Use the context for names, paths, flags, variables, and explicit commands, but never invent them or turn a natural-language request into a command.
 When ambiguous, prefer the safest literal transcription.
 After the complete transcript, append a final line containing exactly {END_MARKER}; never include it earlier.
@@ -199,6 +201,17 @@ def pcm16_wav_rms(path: Path, max_bytes: int = 4_000_000) -> int | None:
     return int(math.sqrt(sum(sample * sample for sample in samples) / sample_count))
 
 
+def transcript_exceeds_speech_rate(text: str, audio_path: Path) -> bool:
+    try:
+        with wave.open(str(audio_path), "rb") as wav:
+            seconds = wav.getnframes() / wav.getframerate()
+    except (OSError, wave.Error, ZeroDivisionError):
+        return False
+    words = len(re.findall(r"[A-Za-z0-9_]+", text))
+    words += math.ceil(len(re.findall(r"[\u3400-\u9fff]", text)) / 2)
+    return words > max(30, math.ceil(seconds * 5))  # Twice a typical 150-word/minute speaking rate.
+
+
 def summarize_http_error(code: int, body: str, model: str) -> str:
     try:
         data = json.loads(body)
@@ -355,7 +368,15 @@ def call_gemini_with_fallback(
         if index == 0:
             write_status(status_file, f"STT processing with {model_label(model)}", "#9a6700")
         try:
-            return call_gemini(api_key, model, prompt, audio_path, max_output_tokens)
+            transcript = call_gemini(api_key, model, prompt, audio_path, max_output_tokens)
+            if transcript_exceeds_speech_rate(transcript, audio_path):
+                message = "detected leaked thought process"
+                write_status(status_file, f"STT {message} - running {model_label(model)} again", "#9a6700")
+                print(f"warning: {message}; running {model} again", file=sys.stderr, flush=True)
+                transcript = call_gemini(api_key, model, prompt, audio_path, max_output_tokens)
+                if transcript_exceeds_speech_rate(transcript, audio_path):
+                    raise GeminiRequestError(f"{model} repeatedly exceeded plausible speech rate")
+            return transcript
         except GeminiRequestError as exc:
             errors.append(str(exc))
             if index + 1 < len(models):

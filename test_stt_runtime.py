@@ -7,7 +7,7 @@ from pathlib import Path
 import socket
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import gemini_speech_to_terminal as gemini_stt
 import stt_toggle
@@ -43,6 +43,7 @@ class GeminiConnectionTest(unittest.TestCase):
             {"maxOutputTokens": 2048, "thinkingConfig": {"thinkingLevel": "low"}},
         )
         self.assertIn("Simplified Chinese", gemini_stt.TRANSCRIPTION_INSTRUCTION)
+        self.assertIn("Omit non-semantic hesitation fillers", gemini_stt.TRANSCRIPTION_INSTRUCTION)
 
     def test_failed_address_is_retried_with_a_fresh_socket(self):
         first = FakeSocket(TimeoutError("black-holed"))
@@ -64,6 +65,45 @@ class GeminiConnectionTest(unittest.TestCase):
         self.assertEqual(second.connected_to, ("192.0.2.2", 443))
         self.assertLessEqual(first.timeouts[0], gemini_stt.GEMINI_CONNECT_ATTEMPT_SECONDS)
         self.assertLessEqual(second.timeouts[0], gemini_stt.GEMINI_CONNECT_ATTEMPT_SECONDS)
+
+    def test_excessive_transcript_is_retried_with_same_model_and_visible_status(self):
+        audio = Path("speech.wav")
+        status = Path("status.json")
+        with (
+            patch.object(gemini_stt, "call_gemini", side_effect=["leaked", "clean"]) as call,
+            patch.object(gemini_stt, "transcript_exceeds_speech_rate", side_effect=[True, False]),
+            patch.object(gemini_stt, "write_status") as write_status,
+        ):
+            result = gemini_stt.call_gemini_with_fallback(
+                "key", ["gemini-3.8-flash", "gemini-3.5-flash"], "prompt", audio, 2048, status
+            )
+
+        self.assertEqual("clean", result)
+        self.assertEqual(["gemini-3.8-flash", "gemini-3.8-flash"], [item.args[1] for item in call.call_args_list])
+        self.assertTrue(any("detected leaked thought process" in item.args[1] for item in write_status.call_args_list))
+
+    def test_excessive_transcript_uses_twice_typical_speech_rate(self):
+        wav = MagicMock()
+        wav.getnframes.return_value = 30 * 16_000
+        wav.getframerate.return_value = 16_000
+        context = MagicMock()
+        context.__enter__.return_value = wav
+        with patch.object(gemini_stt.wave, "open", return_value=context):
+            self.assertFalse(gemini_stt.transcript_exceeds_speech_rate("word " * 150, Path("speech.wav")))
+            self.assertTrue(gemini_stt.transcript_exceeds_speech_rate("word " * 151, Path("speech.wav")))
+            self.assertFalse(gemini_stt.transcript_exceeds_speech_rate("我" * 300, Path("speech.wav")))
+            self.assertTrue(gemini_stt.transcript_exceeds_speech_rate("我" * 302, Path("speech.wav")))
+
+    def test_repeated_excessive_transcript_fails_loudly(self):
+        with (
+            patch.object(gemini_stt, "call_gemini", side_effect=["leaked once", "leaked twice"]),
+            patch.object(gemini_stt, "transcript_exceeds_speech_rate", return_value=True),
+            patch.object(gemini_stt, "write_status"),
+            self.assertRaisesRegex(gemini_stt.GeminiRequestError, "repeatedly exceeded plausible speech rate"),
+        ):
+            gemini_stt.call_gemini_with_fallback(
+                "key", ["gemini-3.8-flash"], "prompt", Path("speech.wav"), 2048, Path("status.json")
+            )
 
 class ToggleLockTest(unittest.TestCase):
     def test_only_one_toggle_invocation_can_hold_the_lock(self):
