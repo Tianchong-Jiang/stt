@@ -24,7 +24,7 @@ STATE_FILE = Path("/tmp/stt_toggle_state.json")
 STATUS_FILE = Path("/tmp/stt_toggle_status.json")
 STATUS_WINDOW_PID_FILE = Path("/tmp/stt_toggle_status_window.pid")
 LOCK_FILE = Path("/tmp/stt_toggle.lock")
-DEFAULT_REPO = Path.home() / "workspace" / "codex_workspace"
+DEFAULT_REPO = Path.cwd()
 RECORD_ARGS = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-d", "300"]
 STOP_POSTROLL_SECONDS = 0.75
 
@@ -368,6 +368,12 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+    args.repo = args.repo.expanduser().resolve()
+    args.cwd = args.cwd.expanduser().resolve()
+    if not args.repo.is_dir():
+        fail(f"repo context is not a directory: {args.repo}")
+    if not args.cwd.is_dir():
+        fail(f"working-directory context is not a directory: {args.cwd}")
     if args.status_window:
         status_window(args)
         return

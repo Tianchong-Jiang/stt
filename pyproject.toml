@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemini-speech-to-terminal"
+version = "0.1.0"
+description = "Context-aware push-to-talk transcription for Linux terminals"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["python-xlib>=0.33"]
+
+[project.urls]
+Repository = "https://github.com/Tianchong-Jiang/stt"
+
+[project.scripts]
+gemini-stt = "gemini_speech_to_terminal:main"
+gemini-stt-toggle = "stt_toggle:main"
+gemini-stt-bridge = "dictate_bridge:main"
+
+[tool.setuptools]
+py-modules = ["dictate_bridge", "gemini_speech_to_terminal", "stt_toggle"]

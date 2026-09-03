@@ -1,6 +1,10 @@
 .gemini_api_key
 .stt_bridge_token
 .env
+.venv/
+*.egg-info/
+build/
+dist/
 *.log
 *.wav
 *.pyc

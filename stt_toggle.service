@@ -4,9 +4,12 @@ After=graphical-session.target
 
 [Service]
 Type=simple
+# This template assumes the checkout is ~/workspace/stt. Replace YOUR_PROJECT
+# with the project whose vocabulary should be supplied as transcription context.
 WorkingDirectory=%h/workspace/stt
 ExecStartPre=/usr/bin/test -r %h/workspace/stt/.gemini_api_key
-ExecStart=%h/miniconda3/bin/python3 %h/workspace/stt/stt_toggle.py --status-window --device plughw:CARD=Microphone,DEV=0
+ExecStartPre=/usr/bin/test -x %h/workspace/stt/.venv/bin/gemini-stt-toggle
+ExecStart=%h/workspace/stt/.venv/bin/gemini-stt-toggle --status-window --device default --repo %h/workspace/YOUR_PROJECT --cwd %h/workspace/YOUR_PROJECT
 Restart=always
 RestartSec=2
 

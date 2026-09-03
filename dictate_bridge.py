@@ -232,7 +232,7 @@ class DictateBridgeHandler(BaseHTTPRequestHandler):
         if length < 0:
             raise RequestError(HTTPStatus.BAD_REQUEST, "invalid Content-Length header")
         if length > self.server.bridge_config.max_upload_bytes:
-            raise RequestError(HTTPStatus.CONTENT_TOO_LARGE, "upload exceeds the configured size limit")
+            raise RequestError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "upload exceeds the configured size limit")
         return length
 
     def handle_expect_100(self) -> bool:

@@ -23,7 +23,7 @@ import wave
 
 
 DEFAULT_MODEL = "gemini-3.8-flash,gemini-3.5-flash"
-DEFAULT_REPO = Path.home() / "workspace" / "codex_workspace"
+DEFAULT_REPO = Path.cwd()
 DEFAULT_CWD = DEFAULT_REPO
 DEFAULT_DEVICE = "default"
 DEFAULT_DURATION = 5
@@ -484,8 +484,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    root = repo_root(args.repo.expanduser().resolve())
+    repo = args.repo.expanduser().resolve()
     cwd = args.cwd.expanduser().resolve()
+    if not repo.is_dir():
+        die(f"repo context is not a directory: {repo}")
+    if not cwd.is_dir():
+        die(f"working-directory context is not a directory: {cwd}")
+    root = repo_root(repo)
     prompt = build_prompt(root, cwd, args.max_files, args.max_terms, args.max_context_chars)
     if args.prompt_dump:
         print(f"{TRANSCRIPTION_INSTRUCTION}\n\n{prompt}")
