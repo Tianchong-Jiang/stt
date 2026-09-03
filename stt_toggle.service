@@ -4,9 +4,9 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/ripl/workspace/stt
-ExecStartPre=/usr/bin/test -r /home/ripl/workspace/stt/.gemini_api_key
-ExecStart=/home/ripl/miniconda3/bin/python3 /home/ripl/workspace/stt/stt_toggle.py --status-window
+WorkingDirectory=%h/workspace/stt
+ExecStartPre=/usr/bin/test -r %h/workspace/stt/.gemini_api_key
+ExecStart=%h/miniconda3/bin/python3 %h/workspace/stt/stt_toggle.py --status-window --device plughw:CARD=Microphone,DEV=0
 Restart=always
 RestartSec=2
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import json
 import os
@@ -23,8 +24,8 @@ STATE_FILE = Path("/tmp/stt_toggle_state.json")
 STATUS_FILE = Path("/tmp/stt_toggle_status.json")
 STATUS_WINDOW_PID_FILE = Path("/tmp/stt_toggle_status_window.pid")
 LOCK_FILE = Path("/tmp/stt_toggle.lock")
-DEVICE = "plughw:CARD=Microphone,DEV=0"
-RECORD_ARGS = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", DEVICE]
+DEFAULT_REPO = Path.home() / "workspace" / "codex_workspace"
+RECORD_ARGS = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1"]
 STOP_POSTROLL_SECONDS = 0.75
 
 
@@ -70,9 +71,13 @@ def make_window_click_through(root: tk.Tk) -> None:
         disp.close()
 
 
-def status_window() -> None:
+def runtime_args(args: argparse.Namespace) -> list[str]:
+    return ["--device", args.device, "--repo", str(args.repo), "--cwd", str(args.cwd)]
+
+
+def status_window(args: argparse.Namespace) -> None:
     STATUS_WINDOW_PID_FILE.write_text(str(os.getpid()))
-    threading.Thread(target=hotkey_loop, daemon=True).start()
+    threading.Thread(target=hotkey_loop, args=(args,), daemon=True).start()
     root = tk.Tk()
     root.title("STT")
     root.overrideredirect(True)
@@ -100,7 +105,7 @@ def status_window() -> None:
     root.mainloop()
 
 
-def hotkey_loop() -> None:
+def hotkey_loop(args: argparse.Namespace) -> None:
     try:
         from Xlib import XK, X, display
     except Exception as exc:
@@ -139,7 +144,7 @@ def hotkey_loop() -> None:
             continue
         last_press = now
         subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve())],
+            [sys.executable, str(Path(__file__).resolve()), *runtime_args(args)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -147,7 +152,7 @@ def hotkey_loop() -> None:
         )
 
 
-def ensure_status_window() -> None:
+def ensure_status_window(args: argparse.Namespace) -> None:
     marker = STATUS_WINDOW_PID_FILE
     if marker.exists():
         try:
@@ -158,7 +163,7 @@ def ensure_status_window() -> None:
             return
         marker.unlink(missing_ok=True)
     proc = subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), "--status-window"],
+        [sys.executable, str(Path(__file__).resolve()), "--status-window", *runtime_args(args)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -197,20 +202,12 @@ def pid_alive(pid: int) -> bool:
 
 
 def try_toggle_lock(path: Path = LOCK_FILE) -> int | None:
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
         return None
-    except BaseException:
-        os.close(fd)
-        raise
     return fd
 
 
@@ -228,9 +225,9 @@ def read_state() -> dict[str, object] | None:
     return state
 
 
-def start_recording() -> None:
+def start_recording(args: argparse.Namespace) -> None:
     trim_log()
-    ensure_status_window()
+    ensure_status_window(args)
     if not TRANSCRIBER.exists():
         fail(f"missing transcriber: {TRANSCRIBER}")
     log("start requested")
@@ -238,7 +235,7 @@ def start_recording() -> None:
     audio.close()
     try:
         proc = subprocess.Popen(
-            RECORD_ARGS + [audio.name],
+            RECORD_ARGS + ["-D", args.device, audio.name],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -256,7 +253,7 @@ def start_recording() -> None:
     set_status("STT recording - press F2 to stop", "#b42318")
 
 
-def stop_recording(state: dict[str, object]) -> None:
+def stop_recording(state: dict[str, object], args: argparse.Namespace) -> None:
     trim_log()
     pid = int(state["pid"])
     audio = Path(str(state["audio"]))
@@ -278,13 +275,24 @@ def stop_recording(state: dict[str, object]) -> None:
     if not audio.exists() or audio.stat().st_size <= 44:
         audio.unlink(missing_ok=True)
         fail("recorded audio file is empty")
-    ensure_status_window()
+    ensure_status_window(args)
     set_status("STT processing", "#9a6700")
     started = float(state.get("started", time.time()))
     log(f"recording stopped seconds={time.time() - started:.2f} bytes={audio.stat().st_size}")
     try:
         result = subprocess.run(
-            [sys.executable, str(TRANSCRIBER), "--audio", str(audio), "--status-file", str(STATUS_FILE)],
+            [
+                sys.executable,
+                str(TRANSCRIBER),
+                "--audio",
+                str(audio),
+                "--status-file",
+                str(STATUS_FILE),
+                "--repo",
+                str(args.repo),
+                "--cwd",
+                str(args.cwd),
+            ],
             cwd=HERE,
             check=False,
             stdout=subprocess.PIPE,
@@ -328,9 +336,19 @@ def type_text(text: str) -> None:
         fail(f"xdotool failed: {(exc.stderr or '').strip()[:200]}")
 
 
-def main() -> None:
-    if len(sys.argv) == 2 and sys.argv[1] == "--status-window":
-        status_window()
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--status-window", action="store_true")
+    parser.add_argument("--device", default="default")
+    parser.add_argument("--repo", type=Path, default=DEFAULT_REPO)
+    parser.add_argument("--cwd", type=Path, default=DEFAULT_REPO)
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> None:
+    args = parse_args(argv)
+    if args.status_window:
+        status_window(args)
         return
     lock_fd = try_toggle_lock()
     if lock_fd is None:
@@ -339,9 +357,9 @@ def main() -> None:
     try:
         state = read_state()
         if state is None:
-            start_recording()
+            start_recording(args)
         else:
-            stop_recording(state)
+            stop_recording(state, args)
     finally:
         os.close(lock_fd)
 

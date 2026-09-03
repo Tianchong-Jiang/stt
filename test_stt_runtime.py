@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import http.client
 import os
 from pathlib import Path
 import socket
@@ -56,36 +55,6 @@ class GeminiConnectionTest(unittest.TestCase):
         self.assertLessEqual(first.timeouts[0], gemini_stt.GEMINI_CONNECT_ATTEMPT_SECONDS)
         self.assertLessEqual(second.timeouts[0], gemini_stt.GEMINI_CONNECT_ATTEMPT_SECONDS)
 
-    def test_https_connection_restores_the_long_response_timeout(self):
-        observed_connect_timeouts = []
-        sock = FakeSocket()
-
-        def fake_connect(connection):
-            observed_connect_timeouts.append(connection.timeout)
-            connection.sock = sock
-
-        with patch.object(http.client.HTTPSConnection, "connect", new=fake_connect):
-            connection = gemini_stt.GeminiHTTPSConnection("example.com", timeout=120.0)
-            connection.connect()
-
-        self.assertEqual(observed_connect_timeouts, [gemini_stt.GEMINI_CONNECT_BUDGET_SECONDS])
-        self.assertEqual(connection.timeout, 120.0)
-        self.assertEqual(sock.timeouts[-1], 120.0)
-
-    def test_https_handler_uses_the_bounded_connection_class(self):
-        handler = gemini_stt.GeminiHTTPSHandler()
-        request = object()
-        with patch.object(handler, "do_open", return_value="response") as do_open:
-            result = handler.https_open(request)
-
-        self.assertEqual(result, "response")
-        do_open.assert_called_once_with(
-            gemini_stt.GeminiHTTPSConnection,
-            request,
-            context=handler._context,
-        )
-
-
 class ToggleLockTest(unittest.TestCase):
     def test_only_one_toggle_invocation_can_hold_the_lock(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -107,7 +76,7 @@ class ToggleLockTest(unittest.TestCase):
             patch.object(stt_toggle, "read_state") as read_state,
             patch.object(stt_toggle, "log") as log,
         ):
-            stt_toggle.main()
+            stt_toggle.main([])
 
         read_state.assert_not_called()
         log.assert_called_once_with("toggle ignored: another invocation is active")

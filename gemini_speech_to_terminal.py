@@ -19,71 +19,25 @@ import struct
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.request
 import wave
 
 
 DEFAULT_MODEL = "gemini-3.5-flash,gemini-3.1-flash-lite,gemini-2.5-flash"
-DEFAULT_REPO = Path("/home/ripl/workspace/codex_workspace")
+DEFAULT_REPO = Path.home() / "workspace" / "codex_workspace"
 DEFAULT_CWD = DEFAULT_REPO
-DEFAULT_DEVICE = "plughw:CARD=Microphone,DEV=0"
+DEFAULT_DEVICE = "default"
 DEFAULT_DURATION = 5
 DEFAULT_API_KEY_FILE = Path(__file__).resolve().with_name(".gemini_api_key")
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
 GEMINI_CONNECT_ATTEMPT_SECONDS = 2.0
 GEMINI_CONNECT_BUDGET_SECONDS = 6.0
-GEMINI_RESPONSE_TIMEOUT_SECONDS = 120.0
 END_MARKER = "[END_OF_TRANSCRIPT]"
-SKIP_DIRS = {
-    ".git",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".venv",
-    "__pycache__",
-    "build",
-    "dist",
-    "node_modules",
-    "wandb",
-}
-TERM_SUFFIXES = {
-    ".bash",
-    ".cfg",
-    ".ini",
-    ".json",
-    ".py",
-    ".sh",
-    ".toml",
-    ".yaml",
-    ".yml",
-}
-STATIC_TERMS = [
-    "CUDA_VISIBLE_DEVICES",
-    "PYTHONPATH",
-    "pytest",
-    "python",
-    "sbatch",
-    "squeue",
-    "srun",
-    "tmux",
-    "git",
-    "grep",
-    "rg",
-    "tail",
-    "wandb",
-    "Hydra",
-    "MuJoCo",
-    "robosuite",
-    "LIBERO",
-    "CALVIN",
-    "RoboCasa",
-    "OpenVLA",
-    "ACTPolicy",
-    "DiffusionPolicy",
-    "update .md",
-    "confirmed",
-]
+SKIP_DIRS = set(".git .mypy_cache .pytest_cache .ruff_cache .venv __pycache__ build dist node_modules wandb".split())
+TERM_SUFFIXES = set(".bash .cfg .ini .json .py .sh .toml .yaml .yml".split())
+STATIC_TERMS = set(
+    "CUDA_VISIBLE_DEVICES PYTHONPATH pytest python sbatch squeue srun tmux git grep rg tail wandb Hydra MuJoCo "
+    "robosuite LIBERO CALVIN RoboCasa OpenVLA ACTPolicy DiffusionPolicy confirmed".split()
+) | {"update .md"}
 
 
 def die(message: str, code: int = 2) -> None:
@@ -98,19 +52,11 @@ class GeminiRequestError(Exception):
 def run(cmd: list[str], cwd: Path | None = None, timeout: float = 5.0) -> str | None:
     try:
         result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=timeout,
+            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=timeout
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if result.returncode != 0:
-        return None
-    return result.stdout
+    return result.stdout if result.returncode == 0 else None
 
 
 def repo_root(path: Path) -> Path:
@@ -121,38 +67,24 @@ def repo_root(path: Path) -> Path:
 
 
 def collect_files(root: Path, limit: int) -> list[str]:
-    out = run(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=root,
-        timeout=10.0,
-    )
+    out = run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], root, 10)
     if out is not None:
         paths = [p for p in out.split("\0") if p]
     else:
-        paths = []
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-            base = Path(dirpath)
-            for name in filenames:
-                try:
-                    rel = (base / name).relative_to(root).as_posix()
-                except ValueError:
-                    continue
-                paths.append(rel)
-    paths = sorted(set(paths), key=lambda p: (p.count("/"), p))
-    return paths[:limit]
+        paths = [
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file() and not SKIP_DIRS.intersection(path.relative_to(root).parts)
+        ]
+    return sorted(set(paths), key=lambda path: (path.count("/"), path))[:limit]
 
 
 def extract_terms(root: Path, files: list[str], limit: int) -> list[str]:
     terms: set[str] = set(STATIC_TERMS)
     ident = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")
-
     for rel in files:
-        path = Path(rel)
-        parts = list(path.parts)
-        terms.update(part for part in parts if 3 <= len(part) <= 80)
+        terms.update(part for part in Path(rel).parts if 3 <= len(part) <= 80)
         terms.update(piece for piece in re.split(r"[^A-Za-z0-9_]+", rel) if len(piece) >= 3)
-
     scanned = 0
     for rel in files:
         path = root / rel
@@ -168,18 +100,11 @@ def extract_terms(root: Path, files: list[str], limit: int) -> list[str]:
         scanned += 1
         if scanned >= 120:
             break
-
-    ordered = sorted(terms, key=lambda t: (t.lower(), t))
-    return ordered[:limit]
+    return sorted(terms, key=lambda term: (term.lower(), term))[:limit]
 
 
 def recent_history(limit: int) -> list[str]:
-    candidates = [
-        os.environ.get("HISTFILE"),
-        str(Path.home() / ".bash_history"),
-        str(Path.home() / ".zsh_history"),
-    ]
-    for candidate in candidates:
+    for candidate in (os.environ.get("HISTFILE"), Path.home() / ".bash_history", Path.home() / ".zsh_history"):
         if not candidate:
             continue
         path = Path(candidate).expanduser()
@@ -189,8 +114,7 @@ def recent_history(limit: int) -> list[str]:
             lines = path.read_text(errors="ignore").splitlines()
         except OSError:
             continue
-        cleaned = [line.strip() for line in lines if line.strip()]
-        return cleaned[-limit:]
+        return [line.strip() for line in lines if line.strip()][-limit:]
     return []
 
 
@@ -204,59 +128,30 @@ def build_prompt(root: Path, cwd: Path, max_files: int, max_terms: int, max_cont
     except ValueError:
         rel_cwd = cwd.resolve().as_posix()
 
-    context = f"""
-Current repo root:
-{root}
-
-Current working directory:
-{rel_cwd}
-
-Current git branch:
-{branch.strip() or "(unknown)"}
-
-Git status, short:
+    context = f"""Repo: {root}
+CWD: {rel_cwd}
+Branch: {branch.strip() or "(unknown)"}
+Git status:
 {status.strip() or "(clean or not a git repo)"}
-
 Recent shell commands:
 {chr(10).join(recent_history(80)) or "(none found)"}
-
 Relevant file paths:
 {chr(10).join(files)}
-
 Relevant identifiers and technical terms:
-{chr(10).join(terms)}
-""".strip()
+{chr(10).join(terms)}"""
     if len(context) > max_context_chars:
         context = context[:max_context_chars] + "\n[context truncated]"
 
-    return f"""
-You are a speech-to-cursor transcription system.
-
-Task:
-Transcribe the user's audio into the exact text that should be inserted at the current cursor.
-
-Rules:
-- Return only the terminal text.
-- Do not explain.
-- Do not use Markdown.
-- Do not wrap the answer in quotes or a code fence.
-- Do not include a trailing Enter key instruction.
-- Transcribe the full audio from beginning to end; do not stop after the first clause.
-- Include the trailing words even if the speaker pauses, hesitates, or ends softly.
-- After the complete transcription, append a new final line containing exactly {END_MARKER}.
-- Never append {END_MARKER} until the entire audio has been transcribed.
-- Do not include {END_MARKER} as part of the transcript itself.
-- Use the repository context to resolve technical words, filenames, class names, config names, benchmark names, environment variables, flags, and shell command patterns.
-- Preserve exact capitalization and punctuation for code terms, paths, flags, and environment variables.
-- Do not invent paths or flags unless the audio strongly implies them and they appear in the context.
-- Do not convert natural-language requests into shell commands unless the audio explicitly says a command such as git, python, pytest, ssh, sbatch, squeue, srun, cd, rg, grep, tail, or tmux.
-- If the user says a natural-language instruction, output the natural-language instruction literally.
-- If the audio is ambiguous, output the safest literal transcription rather than a guessed command.
-- If there is no intelligible speech, return exactly [NO_SPEECH], then the {END_MARKER} line.
+    return f"""Transcribe the full audio into the exact text to insert at the cursor.
+Return only literal text: no explanation, Markdown, quotes, code fence, or Enter instruction.
+Include soft or hesitant trailing words. Preserve capitalization and punctuation of technical terms.
+Use the context for names, paths, flags, variables, and explicit commands, but never invent them or turn a natural-language request into a command.
+When ambiguous, prefer the safest literal transcription.
+After the complete transcript, append a final line containing exactly {END_MARKER}; never include it earlier.
+For no intelligible speech, return [NO_SPEECH] followed by the marker line.
 
 Repository context:
-{context}
-""".strip()
+{context}"""
 
 
 def record_audio(path: Path, duration: int, device: str | None) -> None:
@@ -315,18 +210,12 @@ def summarize_http_error(code: int, body: str, model: str) -> str:
     return f"Gemini API HTTP {code} on {model}: {message[:500]}"
 
 
-def connect_with_retry(
-    address: tuple[str, int],
-    timeout: float,
-    source_address: tuple[str, int] | None = None,
-) -> socket.socket:
-    """Try fresh resolved addresses within one short connection budget."""
+def connect_with_retry(address, timeout, source_address=None):
     host, port = address
-    candidates = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
     deadline = time.monotonic() + timeout
-    last_error: OSError | None = None
-
-    for family, socktype, proto, _, sockaddr in candidates * 2:
+    last_error = None
+    addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    for family, socktype, proto, _, sockaddr in addresses * 2:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -341,38 +230,7 @@ def connect_with_retry(
         except OSError as exc:
             last_error = exc
             sock.close()
-
-    if last_error is not None:
-        raise TimeoutError(f"connection to {host}:{port} failed within {timeout:g}s") from last_error
-    raise OSError(f"no addresses resolved for {host}:{port}")
-
-
-class GeminiHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._create_connection = connect_with_retry
-
-    def connect(self) -> None:
-        response_timeout = self.timeout
-        self.timeout = GEMINI_CONNECT_BUDGET_SECONDS
-        try:
-            super().connect()
-        except Exception:
-            self.close()
-            raise
-        finally:
-            self.timeout = response_timeout
-        if self.sock is not None:
-            self.sock.settimeout(response_timeout)
-
-
-class GeminiHTTPSHandler(urllib.request.HTTPSHandler):
-    def https_open(self, req):
-        return self.do_open(
-            GeminiHTTPSConnection,
-            req,
-            context=self._context,
-        )
+    raise TimeoutError(f"connection to {host}:{port} failed within {timeout:g}s") from last_error
 
 
 def generation_config(model: str, max_output_tokens: int) -> dict[str, object]:
@@ -415,21 +273,29 @@ def call_gemini(api_key: str, model: str, prompt: str, audio_path: Path, max_out
         ],
         "generationConfig": generation_config(model, max_output_tokens),
     }
-    req = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
+    host = "generativelanguage.googleapis.com"
+    connection = http.client.HTTPSConnection(host, timeout=GEMINI_CONNECT_BUDGET_SECONDS)
+    connection._create_connection = connect_with_retry
     try:
-        opener = urllib.request.build_opener(GeminiHTTPSHandler())
-        with opener.open(req, timeout=GEMINI_RESPONSE_TIMEOUT_SECONDS) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise GeminiRequestError(summarize_http_error(exc.code, body, model)) from exc
-    except urllib.error.URLError as exc:
+        connection.connect()
+        if connection.sock is None:
+            raise OSError("HTTPS connection returned no socket")
+        connection.sock.settimeout(120)
+        connection.request(
+            "POST",
+            f"/v1beta/models/{model}:generateContent",
+            json.dumps(payload).encode("utf-8"),
+            {"Content-Type": "application/json", "x-goog-api-key": api_key},
+        )
+        response = connection.getresponse()
+        body = response.read()
+    except (OSError, http.client.HTTPException) as exc:
         raise GeminiRequestError(f"Gemini API request failed on {model}: {exc}") from exc
+    finally:
+        connection.close()
+    if response.status >= 400:
+        raise GeminiRequestError(summarize_http_error(response.status, body.decode("utf-8", errors="replace"), model))
+    data = json.loads(body.decode("utf-8"))
 
     candidates = data.get("candidates", [])
     if candidates:
@@ -460,13 +326,7 @@ def call_gemini(api_key: str, model: str, prompt: str, audio_path: Path, max_out
 
 
 def parse_models(value: str) -> list[str]:
-    models = []
-    seen = set()
-    for model in value.split(","):
-        model = model.strip()
-        if model and model not in seen:
-            models.append(model)
-            seen.add(model)
+    models = list(dict.fromkeys(model for item in value.split(",") if (model := item.strip())))
     if not models:
         die("at least one Gemini model is required")
     return models
@@ -512,7 +372,30 @@ def call_gemini_with_fallback(
                     "#9a6700",
                 )
                 print(f"warning: {exc}; trying {next_model}", file=sys.stderr, flush=True)
-    die("all Gemini models failed: " + " | ".join(errors))
+    raise GeminiRequestError("all Gemini models failed: " + " | ".join(errors))
+
+
+def transcribe_audio_file(
+    api_key: str,
+    models: list[str],
+    prompt: str,
+    audio_path: Path,
+    max_output_tokens: int,
+    min_rms: int = 100,
+    status_file: Path | None = None,
+) -> str:
+    """Transcribe an existing audio file through the shared Gemini pipeline."""
+    rms = pcm16_wav_rms(audio_path)
+    if min_rms > 0 and rms is not None and rms < min_rms:
+        raise GeminiRequestError(f"audio too quiet (rms {rms} < {min_rms}); no intelligible speech detected")
+    return call_gemini_with_fallback(
+        api_key,
+        models,
+        prompt,
+        audio_path,
+        max_output_tokens,
+        status_file,
+    )
 
 
 def clean_answer(text: str) -> str:
@@ -610,20 +493,19 @@ def main() -> None:
         except subprocess.CalledProcessError as exc:
             die(f"recording failed with exit code {exc.returncode}")
 
-    rms = pcm16_wav_rms(audio_path)
-    if args.min_rms > 0 and rms is not None and rms < args.min_rms:
-        die(f"audio too quiet (rms {rms} < {args.min_rms}); no intelligible speech detected")
-
     try:
         status_file = args.status_file.expanduser() if args.status_file else None
-        answer = call_gemini_with_fallback(
+        answer = transcribe_audio_file(
             api_key,
             parse_models(args.model),
             prompt,
             audio_path,
             args.max_output_tokens,
+            args.min_rms,
             status_file,
         )
+    except GeminiRequestError as exc:
+        die(str(exc))
     finally:
         if temp_path and not args.keep_audio:
             temp_path.unlink(missing_ok=True)
