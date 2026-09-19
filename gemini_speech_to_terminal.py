@@ -34,7 +34,8 @@ GEMINI_CONNECT_BUDGET_SECONDS = 6.0
 END_MARKER = "[END_OF_TRANSCRIPT]"
 TRANSCRIPTION_INSTRUCTION = f"""Transcribe the full audio into cursor-ready text, omitting only the fillers described below.
 Return only the transcript: no explanation, Markdown, quotes, code fence, or Enter instruction.
-Use Simplified Chinese characters for Mandarin Chinese and preserve spoken English.
+Do not use Traditional Chinese characters. Use Simplified Chinese for all Chinese text and preserve spoken English.
+Keep the transcript in one paragraph with no line breaks unless the speaker explicitly requests them. Do not put only a few words on each line.
 Omit non-semantic hesitation fillers such as "uh", "um", "er", and "ah".
 Preserve meaningful interjections, deliberate repetition, corrections, and softly spoken trailing words.
 Preserve capitalization and punctuation of technical terms.
@@ -57,6 +58,10 @@ def die(message: str, code: int = 2) -> None:
 
 class GeminiRequestError(Exception):
     """A Gemini request failed, but another configured model may still work."""
+
+
+class GeminiBlockedError(GeminiRequestError):
+    """Gemini blocked the prompt for an undisclosed reason; the same request may pass when sent again."""
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: float = 5.0) -> str | None:
@@ -328,7 +333,8 @@ def call_gemini(api_key: str, model: str, prompt: str, audio_path: Path, max_out
             if text:
                 parts.append(text)
     if not parts:
-        raise GeminiRequestError(f"Gemini returned no text on {model}: {json.dumps(data, indent=2)[:2000]}")
+        error = GeminiBlockedError if "blockReason" in data.get("promptFeedback", {}) else GeminiRequestError
+        raise error(f"Gemini returned no text on {model}: {json.dumps(data, indent=2)[:2000]}")
     return parse_transcript_response("\n".join(parts), model)
 
 
@@ -355,6 +361,17 @@ def write_status(path: Path | None, text: str, color: str, ttl: float | None = N
         pass
 
 
+def call_gemini_again_if_blocked(
+    api_key: str, model: str, prompt: str, audio_path: Path, max_output_tokens: int, status_file: Path | None
+) -> str:
+    try:
+        return call_gemini(api_key, model, prompt, audio_path, max_output_tokens)
+    except GeminiBlockedError as exc:
+        write_status(status_file, f"STT {model_label(model)} blocked - running again", "#9a6700")
+        print(f"warning: {exc}; running {model} again", file=sys.stderr, flush=True)
+        return call_gemini(api_key, model, prompt, audio_path, max_output_tokens)
+
+
 def call_gemini_with_fallback(
     api_key: str,
     models: list[str],
@@ -368,15 +385,21 @@ def call_gemini_with_fallback(
         if index == 0:
             write_status(status_file, f"STT processing with {model_label(model)}", "#9a6700")
         try:
-            transcript = call_gemini(api_key, model, prompt, audio_path, max_output_tokens)
-            if transcript_exceeds_speech_rate(transcript, audio_path):
-                message = "detected leaked thought process"
+            transcript = call_gemini_again_if_blocked(api_key, model, prompt, audio_path, max_output_tokens, status_file)
+            leaked = transcript_exceeds_speech_rate(transcript, audio_path)
+            if leaked:
+                message = "suspected leaked thought process"
                 write_status(status_file, f"STT {message} - running {model_label(model)} again", "#9a6700")
                 print(f"warning: {message}; running {model} again", file=sys.stderr, flush=True)
-                transcript = call_gemini(api_key, model, prompt, audio_path, max_output_tokens)
-                if transcript_exceeds_speech_rate(transcript, audio_path):
-                    raise GeminiRequestError(f"{model} repeatedly exceeded plausible speech rate")
-            return transcript
+                retry_prompt = prompt + (
+                    "\n\nThe previous attempt was too long and may have included your thought process. "
+                    "Return only the final transcribed text. Do not include your thought process, "
+                    "analysis, explanations, or commentary. Transcribe the full audio without summarizing. "
+                    f"Append {END_MARKER} on its own final line as required."
+                )
+                transcript = call_gemini_again_if_blocked(
+                    api_key, model, retry_prompt, audio_path, max_output_tokens, status_file
+                )
         except GeminiRequestError as exc:
             errors.append(str(exc))
             if index + 1 < len(models):
@@ -387,6 +410,10 @@ def call_gemini_with_fallback(
                     "#9a6700",
                 )
                 print(f"warning: {exc}; trying {next_model}", file=sys.stderr, flush=True)
+            continue
+        if leaked and transcript_exceeds_speech_rate(transcript, audio_path):
+            raise GeminiRequestError(f"{model} repeatedly exceeded plausible speech rate")
+        return transcript
     raise GeminiRequestError("all Gemini models failed: " + " | ".join(errors))
 
 

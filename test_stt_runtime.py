@@ -80,7 +80,12 @@ class GeminiConnectionTest(unittest.TestCase):
 
         self.assertEqual("clean", result)
         self.assertEqual(["gemini-3.8-flash", "gemini-3.8-flash"], [item.args[1] for item in call.call_args_list])
-        self.assertTrue(any("detected leaked thought process" in item.args[1] for item in write_status.call_args_list))
+        self.assertEqual("prompt", call.call_args_list[0].args[2])
+        retry_prompt = call.call_args_list[1].args[2]
+        self.assertTrue(retry_prompt.startswith("prompt\n\n"))
+        self.assertIn("Do not include your thought process", retry_prompt)
+        self.assertIn(gemini_stt.END_MARKER, retry_prompt)
+        self.assertTrue(any("suspected leaked thought process" in item.args[1] for item in write_status.call_args_list))
 
     def test_excessive_transcript_uses_twice_typical_speech_rate(self):
         wav = MagicMock()
@@ -96,14 +101,71 @@ class GeminiConnectionTest(unittest.TestCase):
 
     def test_repeated_excessive_transcript_fails_loudly(self):
         with (
-            patch.object(gemini_stt, "call_gemini", side_effect=["leaked once", "leaked twice"]),
+            patch.object(gemini_stt, "call_gemini", side_effect=["leaked once", "leaked twice"]) as call,
             patch.object(gemini_stt, "transcript_exceeds_speech_rate", return_value=True),
             patch.object(gemini_stt, "write_status"),
             self.assertRaisesRegex(gemini_stt.GeminiRequestError, "repeatedly exceeded plausible speech rate"),
         ):
             gemini_stt.call_gemini_with_fallback(
-                "key", ["gemini-3.8-flash"], "prompt", Path("speech.wav"), 2048, Path("status.json")
+                "key", ["gemini-3.8-flash", "gemini-3.5-flash"], "prompt", Path("speech.wav"), 2048, Path("status.json")
             )
+        self.assertEqual(["gemini-3.8-flash"] * 2, [item.args[1] for item in call.call_args_list])
+
+    def test_initial_request_error_still_uses_fallback(self):
+        with (
+            patch.object(gemini_stt, "call_gemini", side_effect=[gemini_stt.GeminiRequestError("unavailable"), "clean"]) as call,
+            patch.object(gemini_stt, "transcript_exceeds_speech_rate", return_value=False),
+        ):
+            result = gemini_stt.call_gemini_with_fallback(
+                "key", ["gemini-3.8-flash", "gemini-3.5-flash"], "prompt", Path("speech.wav"), 2048
+            )
+        self.assertEqual("clean", result)
+        self.assertEqual(["gemini-3.8-flash", "gemini-3.5-flash"], [item.args[1] for item in call.call_args_list])
+
+    def fallback_models_called(self, call_results, exceeds=(False,)):
+        with (
+            patch.object(gemini_stt, "call_gemini", side_effect=call_results) as call,
+            patch.object(gemini_stt, "transcript_exceeds_speech_rate", side_effect=exceeds),
+            patch.object(gemini_stt, "write_status") as write_status,
+        ):
+            result = gemini_stt.call_gemini_with_fallback(
+                "key", ["gemini-3.8-flash", "gemini-3.5-flash"], "prompt", Path("speech.wav"), 2048, Path("status.json")
+            )
+        self.assertEqual("clean", result)
+        self.assertTrue(any("blocked - running again" in item.args[1] for item in write_status.call_args_list))
+        return [item.args[1] for item in call.call_args_list]
+
+    def test_blocked_request_runs_same_model_again_before_fallback(self):
+        blocked = gemini_stt.GeminiBlockedError("blocked")
+        self.assertEqual(["gemini-3.8-flash"] * 2, self.fallback_models_called([blocked, "clean"]))
+        self.assertEqual(
+            ["gemini-3.8-flash"] * 2 + ["gemini-3.5-flash"], self.fallback_models_called([blocked, blocked, "clean"])
+        )
+
+    def test_blocked_leak_retry_falls_back_after_running_again(self):
+        blocked = gemini_stt.GeminiBlockedError("blocked")
+        self.assertEqual(
+            ["gemini-3.8-flash"] * 3 + ["gemini-3.5-flash"],
+            self.fallback_models_called(["leaked", blocked, blocked, "clean"], exceeds=(True, False)),
+        )
+
+    def test_only_prompt_block_is_classified_as_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "speech.wav"
+            audio.write_bytes(b"RIFF")
+            for body, error in [
+                ({"promptFeedback": {"blockReason": "OTHER"}}, gemini_stt.GeminiBlockedError),
+                ({"candidates": [{"content": {}, "finishReason": "STOP"}]}, gemini_stt.GeminiRequestError),
+            ]:
+                connection = MagicMock()
+                connection.getresponse.return_value.status = 200
+                connection.getresponse.return_value.read.return_value = json.dumps(body).encode()
+                with (
+                    patch.object(gemini_stt.http.client, "HTTPSConnection", return_value=connection),
+                    self.assertRaisesRegex(gemini_stt.GeminiRequestError, "returned no text") as raised,
+                ):
+                    gemini_stt.call_gemini("key", "gemini-3.8-flash", "prompt", audio, 2048)
+                self.assertIs(error, type(raised.exception))
 
 class ToggleLockTest(unittest.TestCase):
     def test_only_one_toggle_invocation_can_hold_the_lock(self):
