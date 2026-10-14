@@ -252,8 +252,8 @@ def connect_with_retry(address, timeout, source_address=None):
 
 def generation_config(max_output_tokens: int) -> dict[str, object]:
     return {
-        "maxOutputTokens": max_output_tokens,
-        "thinkingConfig": {"thinkingLevel": "low"},
+        "max_output_tokens": max_output_tokens,
+        "thinking_level": "low",
     }
 
 
@@ -268,73 +268,73 @@ def parse_transcript_response(text: str, model: str) -> str:
 def call_gemini(api_key: str, model: str, prompt: str, audio_path: Path, max_output_tokens: int) -> str:
     audio_bytes = audio_path.read_bytes()
     payload = {
-        "systemInstruction": {"parts": [{"text": TRANSCRIPTION_INSTRUCTION}]},
-        "contents": [
+        "model": model,
+        "system_instruction": TRANSCRIPTION_INSTRUCTION,
+        "input": [
+            {"type": "text", "text": prompt},
             {
-                "role": "user",
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inlineData": {
-                            "mimeType": mime_type(audio_path),
-                            "data": base64.b64encode(audio_bytes).decode("ascii"),
-                        }
-                    },
-                ],
+                "type": "audio",
+                "mime_type": mime_type(audio_path),
+                "data": base64.b64encode(audio_bytes).decode("ascii"),
             }
         ],
-        "generationConfig": generation_config(max_output_tokens),
+        "generation_config": generation_config(max_output_tokens),
+        "service_tier": "priority",
+        "store": False,
     }
     host = "generativelanguage.googleapis.com"
     connection = http.client.HTTPSConnection(host, timeout=GEMINI_CONNECT_BUDGET_SECONDS)
     connection._create_connection = connect_with_retry
+    started = time.monotonic()
     try:
         connection.connect()
+        connected = time.monotonic()
         if connection.sock is None:
             raise OSError("HTTPS connection returned no socket")
         connection.sock.settimeout(120)
         connection.request(
             "POST",
-            f"/v1beta/models/{model}:generateContent",
+            "/v1beta/interactions",
             json.dumps(payload).encode("utf-8"),
             {"Content-Type": "application/json", "x-goog-api-key": api_key},
         )
+        sent = time.monotonic()
         response = connection.getresponse()
+        received = time.monotonic()
         body = response.read()
+        print(
+            f"timing: model={model} connect={connected - started:.3f}s upload={sent - connected:.3f}s "
+            f"wait={received - sent:.3f}s read={time.monotonic() - received:.3f}s "
+            f"server_timing={response.getheader('server-timing')}",
+            file=sys.stderr, flush=True,
+        )
     except (OSError, http.client.HTTPException) as exc:
-        raise GeminiRequestError(f"Gemini API request failed on {model}: {exc}") from exc
+        raise GeminiRequestError(f"Gemini API request failed on {model} after {time.monotonic() - started:.3f}s: {exc}") from exc
     finally:
         connection.close()
     if response.status >= 400:
         raise GeminiRequestError(summarize_http_error(response.status, body.decode("utf-8", errors="replace"), model))
     data = json.loads(body.decode("utf-8"))
 
-    candidates = data.get("candidates", [])
-    if candidates:
-        finish_reason = candidates[0].get("finishReason")
-        usage = data.get("usageMetadata", {})
-        print(
-            "info: "
-            f"model={model} finishReason={finish_reason or '(missing)'} "
-            f"promptTokens={usage.get('promptTokenCount', '?')} "
-            f"candidateTokens={usage.get('candidatesTokenCount', '?')} "
-            f"thoughtTokens={usage.get('thoughtsTokenCount', 0)} "
-            f"totalTokens={usage.get('totalTokenCount', '?')}",
-            file=sys.stderr,
-        )
-        if finish_reason and finish_reason != "STOP":
-            raise GeminiRequestError(f"Gemini finishReason={finish_reason} on {model}; response may be truncated")
-
-    parts = []
-    for candidate in candidates:
-        content = candidate.get("content", {})
-        for part in content.get("parts", []):
-            text = part.get("text")
-            if text:
-                parts.append(text)
+    tier, status = data["service_tier"], data["status"]
+    print(f"info: model={model} serviceTier={tier} status={status}", file=sys.stderr, flush=True)
+    if tier != "priority":
+        raise GeminiRequestError(f"Gemini served {model} on {tier}; priority is required")
+    if status != "completed":
+        raise GeminiRequestError(f"Gemini status={status} on {model}; transcript is not complete")
+    usage = data["usage"]
+    print(
+        f"info: promptTokens={usage['total_input_tokens']} candidateTokens={usage['total_output_tokens']} "
+        f"thoughtTokens={usage['total_thought_tokens']} totalTokens={usage['total_tokens']}",
+        file=sys.stderr,
+    )
+    parts = [
+        part["text"]
+        for step in data["steps"] if step["type"] == "model_output"
+        for part in step["content"] if part["type"] == "text"
+    ]
     if not parts:
-        error = GeminiBlockedError if "blockReason" in data.get("promptFeedback", {}) else GeminiRequestError
-        raise error(f"Gemini returned no text on {model}: {json.dumps(data, indent=2)[:2000]}")
+        raise GeminiRequestError(f"Gemini returned no transcript text on {model}")
     return parse_transcript_response("\n".join(parts), model)
 
 
@@ -517,8 +517,10 @@ def main() -> None:
         die(f"repo context is not a directory: {repo}")
     if not cwd.is_dir():
         die(f"working-directory context is not a directory: {cwd}")
+    started = time.monotonic()
     root = repo_root(repo)
     prompt = build_prompt(root, cwd, args.max_files, args.max_terms, args.max_context_chars)
+    print(f"timing: context={time.monotonic() - started:.3f}s", file=sys.stderr, flush=True)
     if args.prompt_dump:
         print(f"{TRANSCRIPTION_INSTRUCTION}\n\n{prompt}")
         return
