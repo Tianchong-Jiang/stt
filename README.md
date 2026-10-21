@@ -12,7 +12,7 @@ The repository provides three commands:
 
 - Linux and a [Gemini API key](https://aistudio.google.com/app/apikey).
 - `arecord` from ALSA for microphone recording. On Ubuntu/Debian: `sudo apt install alsa-utils`.
-- An X11 session, Tk, and the XTest extension for the F2/paste mode. On Ubuntu/Debian, install `python3-tk`; Wayland-only sessions are not supported by that mode.
+- An X11 session, Tk, `xclip`, and the XTest extension for the F2/paste mode. On Ubuntu/Debian, install `python3-tk` and `xclip`; Wayland-only sessions are not supported by that mode.
 - Optional clipboard-only support for the one-shot command: `wl-copy`, `xclip`, or `xsel`.
 
 ## Install with uv

@@ -322,7 +322,7 @@ def stop_recording(state: dict[str, object], args: argparse.Namespace) -> None:
 
 
 def type_text(text: str) -> None:
-    clipboard = disp = None
+    disp = None
     try:
         from Xlib import X, XK, display
 
@@ -330,29 +330,21 @@ def type_text(text: str) -> None:
         focus = disp.get_input_focus().focus
         if focus in (X.NONE, X.PointerRoot):
             raise RuntimeError("no focused X11 window")
-        clipboard = tk.Tk()
-        clipboard.withdraw()
-        clipboard.clipboard_clear()
-        clipboard.clipboard_append(text)
-        clipboard.selection_handle(lambda offset, length: text[int(offset):int(offset) + int(length)], selection="PRIMARY")
-        clipboard.selection_own(selection="PRIMARY")
-        clipboard.update()
+        # xclip keeps answering clipboard requests in the background until another app takes the clipboard.
+        # A short-lived owner can exit with a request unanswered, which freezes Chromium apps such as Obsidian.
+        subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=True)
         focus.set_input_focus(X.RevertToPointerRoot, X.CurrentTime)
-        shift = disp.keysym_to_keycode(XK.string_to_keysym("Shift_L"))
-        insert = disp.keysym_to_keycode(XK.string_to_keysym("Insert"))
-        if not shift or not insert:
-            raise RuntimeError("could not resolve Shift+Insert keycodes")
-        for event, keycode in ((X.KeyPress, shift), (X.KeyPress, insert), (X.KeyRelease, insert), (X.KeyRelease, shift)):
-            disp.xtest_fake_input(event, keycode)
+        keys = [disp.keysym_to_keycode(XK.string_to_keysym(key)) for key in ("Control_L", "Shift_L", "v")]
+        if not all(keys):
+            raise RuntimeError("could not resolve Ctrl+Shift+V keycodes")
+        for keycode in keys:
+            disp.xtest_fake_input(X.KeyPress, keycode)
+        for keycode in reversed(keys):
+            disp.xtest_fake_input(X.KeyRelease, keycode)
         disp.sync()
-        for _ in range(25):
-            clipboard.update()
-            time.sleep(0.01)
     except Exception as exc:
         fail(f"clipboard paste failed: {exc}")
     finally:
-        if clipboard is not None:
-            clipboard.destroy()
         if disp is not None:
             disp.close()
 
