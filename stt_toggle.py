@@ -333,6 +333,9 @@ def type_text(text: str) -> None:
         # xclip keeps answering clipboard requests in the background until another app takes the clipboard.
         # A short-lived owner can exit with a request unanswered, which freezes Chromium apps such as Obsidian.
         subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=True)
+        # gnome-terminal disables Paste on every clipboard owner change until the new owner answers its TARGETS request,
+        # and exposes no signal for that; a keystroke sent sooner is silently dropped.
+        time.sleep(0.1)
         focus.set_input_focus(X.RevertToPointerRoot, X.CurrentTime)
         keys = [disp.keysym_to_keycode(XK.string_to_keysym(key)) for key in ("Control_L", "Shift_L", "v")]
         if not all(keys):
