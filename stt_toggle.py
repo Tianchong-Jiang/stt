@@ -24,6 +24,7 @@ STATE_FILE = Path("/tmp/stt_toggle_state.json")
 STATUS_FILE = Path("/tmp/stt_toggle_status.json")
 STATUS_WINDOW_PID_FILE = Path("/tmp/stt_toggle_status_window.pid")
 LOCK_FILE = Path("/tmp/stt_toggle.lock")
+PROCESSING_PID_FILE = Path("/tmp/stt_toggle_processing.pid")
 DEFAULT_REPO = Path.cwd()
 RECORD_ARGS = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-d", "300"]
 STOP_POSTROLL_SECONDS = 0.75
@@ -253,6 +254,30 @@ def start_recording(args: argparse.Namespace) -> None:
     set_status("STT recording - press F2 to stop", "#b42318")
 
 
+def run_transcriber(command: list[str]) -> subprocess.CompletedProcess:
+    started = time.monotonic()
+    sleep_offset = time.clock_gettime(time.CLOCK_BOOTTIME) - started
+    with subprocess.Popen(command, cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+        # The transcriber retries forever; a later F2 press cancels it by killing this pid.
+        PROCESSING_PID_FILE.write_text(str(proc.pid))
+        try:
+            while True:
+                try:
+                    output = proc.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    output = None
+                now = time.monotonic()
+                if time.clock_gettime(time.CLOCK_BOOTTIME) - now - sleep_offset > 1:
+                    raise TimeoutError("transcription cancelled after system sleep; press F2 again")
+                if output is not None:
+                    return subprocess.CompletedProcess(command, proc.returncode, *output)
+        finally:
+            PROCESSING_PID_FILE.unlink(missing_ok=True)
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate()
+
+
 def stop_recording(state: dict[str, object], args: argparse.Namespace) -> None:
     trim_log()
     pid = int(state["pid"])
@@ -280,7 +305,7 @@ def stop_recording(state: dict[str, object], args: argparse.Namespace) -> None:
     started = float(state.get("started", time.time()))
     log(f"recording stopped seconds={time.time() - started:.2f} bytes={audio.stat().st_size}")
     try:
-        result = subprocess.run(
+        result = run_transcriber(
             [
                 sys.executable,
                 str(TRANSCRIBER),
@@ -292,19 +317,17 @@ def stop_recording(state: dict[str, object], args: argparse.Namespace) -> None:
                 str(args.repo),
                 "--cwd",
                 str(args.cwd),
-            ],
-            cwd=HERE,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=180,
+            ]
         )
-    except subprocess.TimeoutExpired:
-        log(f"kept audio after transcriber timeout: {audio}")
-        fail("transcriber timed out")
+    except TimeoutError as exc:
+        log(f"kept audio after cancelled transcription: {audio}")
+        fail(str(exc))
     if result.stderr.strip():
         log("transcriber stderr: " + result.stderr.strip().replace("\n", "\\n")[:2000])
+    if result.returncode == -signal.SIGTERM:
+        log(f"kept audio after F2 cancelled transcription: {audio}")
+        set_status("STT cancelled", "#222222", ttl=2)
+        return
     if result.returncode != 0:
         log(f"kept audio after transcriber failure: {audio}")
         fail(transcriber_error(result.stderr, result.returncode))
@@ -374,8 +397,14 @@ def main(argv=None) -> None:
         return
     lock_fd = try_toggle_lock()
     if lock_fd is None:
+        if PROCESSING_PID_FILE.exists():
+            os.kill(int(PROCESSING_PID_FILE.read_text()), signal.SIGTERM)
+            log("cancel requested")
+            return
         log("toggle ignored: another invocation is active")
         return
+    # Only the transcribing lock holder writes this file; one seen here was left by a killed run.
+    PROCESSING_PID_FILE.unlink(missing_ok=True)
     try:
         state = read_state()
         if state is None:

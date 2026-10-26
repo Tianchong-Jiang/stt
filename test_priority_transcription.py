@@ -89,7 +89,36 @@ class PriorityTranscriptionTest(unittest.TestCase):
     def test_http_error_still_reports_api_error(self):
         self.response.status = 429
         self.body = {"error": {"message": "quota exhausted"}}
-        with self.assertRaisesRegex(stt.GeminiRequestError, "HTTP 429.*quota exhausted"):
+        with self.assertRaisesRegex(stt.GeminiRequestError, "HTTP 429.*quota exhausted") as raised:
+            self.call()
+        self.assertNotIsInstance(raised.exception, stt.GeminiTransientError)
+
+    def test_only_errors_a_resend_can_fix_are_transient(self):
+        for status, message, transient in [
+            (500, "Internal error encountered.", True),
+            (503, "The model is overloaded.", True),
+            (400, "Input blocked: This request was blocked by Gemini's filters.", True),
+            (400, "Request contains an invalid argument.", False),
+            (401, "API key not valid.", False),
+            (403, "Permission denied.", False),
+            (404, "Model not found.", False),
+            (429, "You exceeded your current quota.", False),
+        ]:
+            with self.subTest(status=status, message=message):
+                self.response.status = status
+                self.body = {"error": {"message": message}}
+                with self.assertRaises(stt.GeminiRequestError) as raised:
+                    self.call()
+                self.assertEqual(transient, isinstance(raised.exception, stt.GeminiTransientError))
+
+    def test_network_failure_is_transient(self):
+        self.connection.getresponse.side_effect = TimeoutError("The read operation timed out")
+        with self.assertRaisesRegex(stt.GeminiTransientError, "read operation timed out"):
+            self.call()
+
+    def test_completed_result_without_output_is_transient(self):
+        del self.body["steps"]
+        with self.assertRaisesRegex(stt.GeminiTransientError, "no transcript text"):
             self.call()
 
 
